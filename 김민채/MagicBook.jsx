@@ -1,0 +1,776 @@
+/**
+ * MagicBook.jsx — 마법서 개봉 애니메이션 (React + three.js)
+ * 마법책이 펼쳐지며 별가루·글자 조각이 회오리치고, 지팡이의 별 보석이 번쩍이는 연출
+ *
+ * 설치:  npm i three
+ * 사용:  import MagicBook from "./MagicBook";
+ *        <MagicBook />
+ *
+ * props
+ *  - fullscreen    true면 화면 전체(position: fixed), false면 부모 요소를 채움(부모에 position: relative 필요)
+ *  - showCaptions  하단 자막과 진행 점 표시 여부
+ *  - showControls  "다시 재생 / 느리게 보기" 버튼 표시 여부
+ *  - showTitle     왼쪽 위 작은 제목 표시 여부
+ *  - onPhase       단계가 바뀔 때 호출 (0 등장, 1 펼침, 2 회오리, 3 충전, 4 번쩍)
+ */
+import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+
+// three 버전에 상관없이 캔버스 텍스처를 sRGB로 처리
+function setSRGB(t) {
+  if (THREE["SRGBColorSpace"] !== undefined && "colorSpace" in t) t.colorSpace = THREE["SRGBColorSpace"];
+  else t.encoding = THREE["sRGBEncoding"];
+}
+
+
+/* ================= 타임라인 (초) ================= */
+const T = {
+  appear: 0.0,   // 책 등장
+  open: 0.45,    // 책 펼침 시작
+  dust: 0.75,    // 별가루·글자 회오리 시작
+  wandIn: 1.9,   // 지팡이 등장
+  charge: 2.65,  // 별 보석 충전
+  flash: 3.3,    // 번쩍!
+};
+
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a), 0, 1);
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = {
+  outCubic: (t) => 1 - Math.pow(1 - t, 3),
+  inOutSine: (t) => -(Math.cos(Math.PI * t) - 1) / 2,
+  outBack: (t) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  outQuart: (t) => 1 - Math.pow(1 - t, 4),
+};
+// 시드 고정 랜덤 (다시 재생해도 같은 모양)
+let seed = 7;
+const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+const rr = (a, b) => a + (b - a) * rand();
+
+/* ================= 캔버스 텍스처 ================= */
+function canvas(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+function starPath(ctx, cx, cy, spikes, outer, inner, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < spikes * 2; i++) {
+    const r = i % 2 === 0 ? outer : inner;
+    const a = (rot || -Math.PI / 2) + (i * Math.PI) / spikes;
+    ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+  }
+  ctx.closePath();
+}
+function tex(c) { const t = new THREE.CanvasTexture(c); setSRGB(t); t.anisotropy = 4; return t; }
+
+function makeCoverTexture() {
+  const c = canvas(512, 732), g = c.getContext("2d");
+  const grd = g.createLinearGradient(0, 0, 512, 732);
+  grd.addColorStop(0, "#2d5aa8"); grd.addColorStop(0.55, "#23488c"); grd.addColorStop(1, "#162f63");
+  g.fillStyle = grd; g.fillRect(0, 0, 512, 732);
+  // 가죽 질감
+  for (let i = 0; i < 2500; i++) {
+    g.fillStyle = `rgba(0,0,0,${Math.random() * 0.08})`;
+    g.fillRect(Math.random() * 512, Math.random() * 732, 2, 2);
+  }
+  g.strokeStyle = "#e8c46a"; g.lineWidth = 10; g.strokeRect(26, 26, 460, 680);
+  g.lineWidth = 3; g.strokeRect(46, 46, 420, 640);
+  // 모서리 장식
+  [[46, 46], [466, 46], [46, 686], [466, 686]].forEach(([x, y]) => {
+    g.fillStyle = "#e8c46a"; starPath(g, x, y, 4, 18, 6); g.fill();
+  });
+  // 중앙 별
+  g.shadowColor = "rgba(255,210,120,0.8)"; g.shadowBlur = 20;
+  const sg = g.createLinearGradient(170, 250, 340, 480);
+  sg.addColorStop(0, "#fff0b0"); sg.addColorStop(1, "#d9a338");
+  g.fillStyle = sg; starPath(g, 256, 366, 5, 110, 46); g.fill();
+  g.shadowBlur = 0;
+  g.strokeStyle = "#8a5d14"; g.lineWidth = 3; g.stroke();
+  return tex(c);
+}
+function makeEndpaperTexture() {
+  const c = canvas(256, 366), g = c.getContext("2d");
+  g.fillStyle = "#1a2d5e"; g.fillRect(0, 0, 256, 366);
+  g.fillStyle = "rgba(232,196,106,0.35)";
+  for (let y = 20; y < 366; y += 36) for (let x = (y / 36) % 2 ? 20 : 38; x < 256; x += 36) { starPath(g, x, y, 4, 6, 2); g.fill(); }
+  return tex(c);
+}
+function makePageTexture() {
+  const c = canvas(512, 732), g = c.getContext("2d");
+  const grd = g.createLinearGradient(0, 0, 512, 0);
+  grd.addColorStop(0, "#c9b58a"); grd.addColorStop(0.12, "#efe1bd"); grd.addColorStop(1, "#f7ecd0");
+  g.fillStyle = grd; g.fillRect(0, 0, 512, 732);
+  g.fillStyle = "rgba(90,60,30,0.35)";
+  for (let y = 90; y < 660; y += 26) {
+    let x = 80;
+    while (x < 450) { const w = 12 + Math.random() * 46; if (x + w > 450) break; g.fillRect(x, y, w, 5); x += w + 8; }
+  }
+  g.strokeStyle = "rgba(160,110,40,0.5)"; g.lineWidth = 2;
+  g.beginPath(); g.arc(265, 55, 22, 0, Math.PI * 2); g.stroke();
+  starPath(g, 265, 55, 5, 16, 7); g.stroke();
+  return tex(c);
+}
+function makeGlowTexture() {
+  const c = canvas(256, 256), g = c.getContext("2d");
+  const grd = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grd.addColorStop(0, "rgba(255,255,255,1)"); grd.addColorStop(0.18, "rgba(255,240,190,0.9)");
+  grd.addColorStop(0.45, "rgba(255,190,90,0.35)"); grd.addColorStop(1, "rgba(255,160,60,0)");
+  g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
+}
+function makeRaysTexture() {
+  const c = canvas(512, 512), g = c.getContext("2d");
+  g.translate(256, 256);
+  for (let i = 0; i < 16; i++) {
+    const len = i % 2 === 0 ? 250 : 150, w = i % 2 === 0 ? 10 : 6;
+    const grd = g.createLinearGradient(0, 0, len, 0);
+    grd.addColorStop(0, "rgba(255,250,220,1)"); grd.addColorStop(1, "rgba(255,200,100,0)");
+    g.fillStyle = grd;
+    g.beginPath(); g.moveTo(0, -w); g.lineTo(len, 0); g.lineTo(0, w); g.closePath(); g.fill();
+    g.rotate((Math.PI * 2) / 16);
+  }
+  return new THREE.CanvasTexture(c);
+}
+function makeRingTexture() {
+  const c = canvas(256, 256), g = c.getContext("2d");
+  const grd = g.createRadialGradient(128, 128, 90, 128, 128, 126);
+  grd.addColorStop(0, "rgba(255,220,140,0)"); grd.addColorStop(0.6, "rgba(255,240,200,0.9)"); grd.addColorStop(1, "rgba(255,200,120,0)");
+  g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
+}
+function makeCircleTexture() {
+  const c = canvas(1024, 1024), g = c.getContext("2d");
+  g.translate(512, 512);
+  g.strokeStyle = "rgba(255,214,130,0.95)"; g.fillStyle = "rgba(255,214,130,0.95)";
+  g.shadowColor = "rgba(255,200,100,0.9)"; g.shadowBlur = 12;
+  [490, 470, 360, 340].forEach((r, i) => { g.lineWidth = i % 2 ? 2 : 5; g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.stroke(); });
+  g.font = '44px "Cinzel", Georgia, serif'; g.textAlign = "center"; g.textBaseline = "middle";
+  const text = "LUMEN·STELLA·APERIO·LIBRUM·MAGIA·ASTRA·";
+  for (let i = 0; i < text.length; i++) {
+    g.save(); g.rotate((i / text.length) * Math.PI * 2); g.fillText(text[i], 0, -415); g.restore();
+  }
+  g.lineWidth = 4;
+  starPath(g, 0, 0, 6, 340, 196, -Math.PI / 2); g.stroke();
+  g.beginPath(); for (let i = 0; i < 7; i++) { const a = -Math.PI / 2 + (i * 2 * Math.PI) / 6; g.lineTo(Math.cos(a) * 340, Math.sin(a) * 340); } g.stroke();
+  g.beginPath(); g.arc(0, 0, 120, 0, Math.PI * 2); g.stroke();
+  return new THREE.CanvasTexture(c);
+}
+const GLYPHS = ["A", "Ω", "Σ", "Ψ", "Δ", "λ", "∞", "✦", "★", "☾", "마", "법", "별", "빛", "ㄱ", "ㅂ", "R", "M", "Ж", "☆", "§", "Φ"];
+function drawGlyph(c, ch) {
+  const g = c.getContext("2d");
+  g.clearRect(0, 0, 128, 128);
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = '700 84px "Nanum Myeongjo", "Cinzel", Georgia, serif';
+  g.shadowColor = "rgba(255,200,90,1)"; g.shadowBlur = 16;
+  g.fillStyle = "#ffe9a8"; g.fillText(ch, 64, 68);
+  g.shadowBlur = 4; g.fillStyle = "#fffaf0"; g.fillText(ch, 64, 68);
+}
+
+/* ================= 셰이더 ================= */
+const starFrag = `
+  varying vec3 vColor; varying float vAlpha;
+  void main(){
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    float core = exp(-d*d*70.0);
+    float halo = exp(-d*d*14.0) * 0.35;
+    float rays = max(0.0, 1.0 - abs(uv.x)*16.0) * max(0.0, 1.0 - abs(uv.y)*2.0)
+               + max(0.0, 1.0 - abs(uv.y)*16.0) * max(0.0, 1.0 - abs(uv.x)*2.0);
+    float a = (core + halo + rays*0.55) * vAlpha;
+    if (a < 0.003) discard;
+    gl_FragColor = vec4(vColor * a, a);
+  }`;
+const vortexVert = `
+  uniform float uTime; uniform float uPR; uniform float uBoost;
+  attribute float aBirth; attribute float aLife; attribute float aR0; attribute float aA0;
+  attribute float aSpeed; attribute float aSpin; attribute float aSize; attribute vec3 aColor;
+  varying vec3 vColor; varying float vAlpha;
+  void main(){
+    vColor = aColor;
+    float t = uTime - aBirth;
+    if (t < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+    float lt = mod(t, aLife);
+    float p = lt / aLife;
+    float y = 0.15 + lt * aSpeed * (1.0 + 0.35 * p);
+    float ang = aA0 + lt * aSpin + y * 0.9;
+    float r = aR0 * (1.0 - 0.4 * smoothstep(0.0, 0.25, p)) + y * 0.3;
+    vec3 pos = vec3(cos(ang) * r, y, sin(ang) * r);
+    vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mv;
+    float tw = 0.55 + 0.45 * sin(uTime * 9.0 + aA0 * 17.0);
+    gl_PointSize = aSize * uPR * (0.8 + 0.4 * uBoost) * tw * (300.0 / -mv.z);
+    vAlpha = smoothstep(0.0, 0.06, p) * (1.0 - smoothstep(0.55, 1.0, p));
+  }`;
+const burstVert = `
+  uniform float uTime; uniform float uPR; uniform vec3 uOrigin;
+  attribute vec3 aDir; attribute float aSpeed; attribute float aSize; attribute vec3 aColor; attribute float aDelay;
+  varying vec3 vColor; varying float vAlpha;
+  void main(){
+    vColor = aColor;
+    float t = uTime - aDelay;
+    if (t < 0.0 || t > 3.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+    float travel = aSpeed * (1.0 - exp(-t * 2.4)) / 2.4;
+    vec3 pos = uOrigin + aDir * travel + vec3(0.0, -0.18 * t * t, 0.0);
+    vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mv;
+    float tw = 0.6 + 0.4 * sin(uTime * 14.0 + aSpeed * 31.0);
+    gl_PointSize = aSize * uPR * tw * (300.0 / -mv.z);
+    vAlpha = exp(-t * 1.25) * smoothstep(0.0, 0.03, t);
+  }`;
+
+const PALETTE = [
+  [1.0, 0.83, 0.42], [1.0, 0.95, 0.8], [1.0, 0.72, 0.3], [0.6, 0.82, 1.0], [0.86, 0.66, 1.0],
+];
+const pickColor = () => { const r = rand(); return r < 0.4 ? PALETTE[0] : r < 0.65 ? PALETTE[1] : r < 0.8 ? PALETTE[2] : r < 0.92 ? PALETTE[3] : PALETTE[4]; };
+
+/* ================= 씬 생성 ================= */
+function createMagicScene(mount, opts) {
+  seed = 7;
+  const W = 1.4, D = 2.0, N = 28, GAP = 0.0036, BASE = 0.018;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  const PR = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setPixelRatio(PR);
+  if ("outputColorSpace" in renderer) renderer.outputColorSpace = THREE["SRGBColorSpace"];
+  else renderer.outputEncoding = THREE["sRGBEncoding"];
+  // 원본(three r147)과 같은 색·조명이 나오도록 버전별 보정
+  const CM = THREE["ColorManagement"];
+  const prevCM = CM ? ("enabled" in CM ? CM.enabled : CM.legacyMode) : undefined;
+  if (CM) { if ("enabled" in CM) CM.enabled = false; else if ("legacyMode" in CM) CM.legacyMode = true; }
+  if ("useLegacyLights" in renderer) renderer.useLegacyLights = true;
+  const REV = parseInt(THREE.REVISION, 10) || 0;
+  const LI = REV >= 165 ? Math.PI : 1, PLI = REV >= 165 ? Math.PI * 4 : 1;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.95;
+  mount.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const bgDark = new THREE.Color("#060a1c"), bgLit = new THREE.Color("#121a3c");
+  scene.background = bgDark.clone();
+  scene.fog = new THREE.FogExp2(0x060a1c, 0.035);
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+  const camBase = new THREE.Vector3(0, 4.4, 5.8), camTarget = new THREE.Vector3(0, 1.45, 0);
+  let camFactor = 1;
+
+  const ambient = new THREE.AmbientLight(0x6a7cc0, 0.45 * LI);
+  const key = new THREE.DirectionalLight(0xbfd0ff, 0.7 * LI); key.position.set(-3, 6, 4);
+  const bookLight = new THREE.PointLight(0xffc56b, 0, 8, 2); bookLight.position.set(0, 0.9, 0.1);
+  const gemLight = new THREE.PointLight(0xffd88a, 0, 14, 2);
+  scene.add(ambient, key, bookLight, gemLight);
+
+  /* ---- 배경 별 ---- */
+  {
+    const n = 900, pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const th = rr(0, Math.PI * 2), ph = rr(0.05, 1.3), r = rr(28, 60);
+      pos[i * 3] = Math.cos(th) * Math.sin(ph) * r;
+      pos[i * 3 + 1] = Math.cos(ph) * r - 6;
+      pos[i * 3 + 2] = Math.sin(th) * Math.sin(ph) * r - 20;
+    }
+    const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    const bg = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.25, map: makeGlowTexture(), color: 0xaebcff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    scene.add(bg);
+  }
+
+  /* ---- 마법진 ---- */
+  const circleMat = new THREE.MeshBasicMaterial({ map: makeCircleTexture(), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffd48a });
+  const magicCircle = new THREE.Mesh(new THREE.PlaneGeometry(6.2, 6.2), circleMat);
+  magicCircle.rotation.x = -Math.PI / 2; magicCircle.position.y = -0.06;
+  scene.add(magicCircle);
+
+  /* ---- 책 ---- */
+  const book = new THREE.Group(); scene.add(book);
+  const coverTex = makeCoverTexture(), endTex = makeEndpaperTexture(), pageTex = makePageTexture();
+  const edgeMat = new THREE.MeshStandardMaterial({ color: 0x1b3163, roughness: 0.6 });
+  const outMat = new THREE.MeshStandardMaterial({ map: coverTex, roughness: 0.55, metalness: 0.15 });
+  const inMat = new THREE.MeshStandardMaterial({ map: endTex, roughness: 0.8 });
+  const pageMat = new THREE.MeshStandardMaterial({ map: pageTex, roughness: 0.92, side: THREE.DoubleSide, emissive: new THREE.Color(0xffc46a), emissiveIntensity: 0 });
+
+  const coverGeo = new THREE.BoxGeometry(W + 0.05, 0.05, D + 0.1); coverGeo.translate((W + 0.05) / 2, 0, 0);
+  const pageGeo = new THREE.PlaneGeometry(W * 0.97, D * 0.95); pageGeo.rotateX(-Math.PI / 2); pageGeo.translate((W * 0.97) / 2, 0, 0);
+
+  function makePivot(mesh) { const p = new THREE.Group(); p.add(mesh); book.add(p); return p; }
+  // 커버 재질 순서: +x, -x, +y, -y, +z, -z
+  const leftCover = makePivot(new THREE.Mesh(coverGeo, [edgeMat, edgeMat, outMat, inMat, edgeMat, edgeMat]));
+  const rightCover = makePivot(new THREE.Mesh(coverGeo, [edgeMat, edgeMat, inMat, outMat, edgeMat, edgeMat]));
+  const spine = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1, D + 0.1), edgeMat); book.add(spine);
+
+  const pages = [];
+  for (let i = 0; i < N; i++) {
+    const pv = makePivot(new THREE.Mesh(pageGeo, pageMat));
+    const right = i >= N / 2, k = N - 1 - i;
+    pages.push({
+      pv, right, i,
+      closedY: BASE + i * GAP,
+      openY: right ? BASE + k * GAP : BASE + i * GAP,
+      openAng: right ? 0.06 + k * 0.0032 : Math.PI - 0.06 - i * 0.0032,
+      start: right ? T.open + 0.1 + k * 0.026 : T.open,
+      dur: right ? 0.42 : 0.35,
+    });
+  }
+  const closedTop = BASE + N * GAP + 0.03;
+
+  const bookGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeGlowTexture(), color: 0xffc870, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 }));
+  bookGlow.position.set(0, 0.35, 0); scene.add(bookGlow);
+
+  function updateBook(t) {
+    const ap = seg(t, T.appear, T.open);
+    const s = 1.3 * ease.outBack(ap);
+    book.scale.setScalar(Math.max(0.0001, s));
+    const op = ease.outCubic(seg(t, T.open, T.open + 0.9));
+    book.position.x = lerp((W / 2) * 1.3, 0, op);
+    book.rotation.y = lerp(-0.7, 0, ease.outCubic(ap));
+    const after = seg(t, T.open + 0.8, T.open + 1.6);
+    book.position.y = 0.08 * Math.sin(t * 1.7) * after + 0.12 * after;
+
+    leftCover.rotation.z = lerp(Math.PI, Math.PI - 0.05, op);
+    const rc = ease.outCubic(seg(t, T.open, T.open + 0.45));
+    rightCover.rotation.z = lerp(Math.PI - 0.005, 0.05, rc);
+    rightCover.position.y = lerp(closedTop, 0, rc);
+    spine.scale.y = lerp(closedTop + 0.03, 0.03, op);
+    spine.position.y = spine.scale.y / 2 - 0.03;
+
+    const flutterAmp = seg(t, T.open + 1.0, T.open + 1.5);
+    for (const p of pages) {
+      const e = ease.outCubic(seg(t, p.start, p.start + p.dur));
+      let ang = lerp(Math.PI - 0.01, p.openAng, e);
+      // 위쪽 몇 장은 마법 바람에 펄럭임
+      const top = p.right ? p.i >= N / 2 && p.i < N / 2 + 4 : p.i >= N / 2 - 4;
+      if (top && flutterAmp > 0) {
+        const w = (0.5 + 0.5 * Math.sin(t * 6.5 + p.i * 1.9)) * 0.09 * flutterAmp * (p.right ? 1 : -1);
+        ang += w;
+      }
+      p.pv.rotation.z = ang;
+      p.pv.position.y = lerp(p.closedY, p.openY, e);
+    }
+
+    const glow = seg(t, T.open + 0.1, T.dust + 0.5);
+    pageMat.emissiveIntensity = glow * 0.14;
+    bookLight.intensity = (glow * 1.7 + 0.4 * Math.sin(t * 5) * glow) * PLI;
+    bookGlow.material.opacity = glow * 0.5;
+    bookGlow.scale.setScalar(2.2 + glow * 2.2 + 0.2 * Math.sin(t * 4));
+    bookGlow.position.y = 0.35 + book.position.y;
+
+    circleMat.opacity = seg(t, T.open + 0.2, T.dust + 0.8) * 0.55;
+    magicCircle.rotation.z = t * 0.25;
+    const cs = 0.6 + 0.4 * ease.outCubic(seg(t, T.open, T.dust + 0.8));
+    magicCircle.scale.setScalar(cs);
+  }
+
+  /* ---- 별가루 회오리 ---- */
+  const VN = 2600;
+  const vortexGeo = new THREE.BufferGeometry();
+  {
+    const pos = new Float32Array(VN * 3);
+    const aBirth = new Float32Array(VN), aLife = new Float32Array(VN), aR0 = new Float32Array(VN), aA0 = new Float32Array(VN),
+      aSpeed = new Float32Array(VN), aSpin = new Float32Array(VN), aSize = new Float32Array(VN), aColor = new Float32Array(VN * 3);
+    for (let i = 0; i < VN; i++) {
+      aLife[i] = rr(2.2, 3.8);
+      aBirth[i] = T.dust + (rand() < 0.4 ? rr(0, 0.35) : rr(0, aLife[i]));
+      aR0[i] = Math.sqrt(rand()) * 1.1;
+      aA0[i] = rr(0, Math.PI * 2);
+      aSpeed[i] = rr(1.1, 2.4);
+      aSpin[i] = rr(1.4, 3.0);
+      aSize[i] = rand() < 0.08 ? rr(0.22, 0.34) : rr(0.06, 0.16);
+      const c = pickColor(); aColor.set(c, i * 3);
+    }
+    vortexGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    vortexGeo.setAttribute("aBirth", new THREE.BufferAttribute(aBirth, 1));
+    vortexGeo.setAttribute("aLife", new THREE.BufferAttribute(aLife, 1));
+    vortexGeo.setAttribute("aR0", new THREE.BufferAttribute(aR0, 1));
+    vortexGeo.setAttribute("aA0", new THREE.BufferAttribute(aA0, 1));
+    vortexGeo.setAttribute("aSpeed", new THREE.BufferAttribute(aSpeed, 1));
+    vortexGeo.setAttribute("aSpin", new THREE.BufferAttribute(aSpin, 1));
+    vortexGeo.setAttribute("aSize", new THREE.BufferAttribute(aSize, 1));
+    vortexGeo.setAttribute("aColor", new THREE.BufferAttribute(aColor, 3));
+  }
+  const vortexMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPR: { value: PR }, uBoost: { value: 1 } },
+    vertexShader: vortexVert, fragmentShader: starFrag,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const vortex = new THREE.Points(vortexGeo, vortexMat); vortex.frustumCulled = false; scene.add(vortex);
+
+  /* ---- 글자 조각 ---- */
+  const glyphTex = {};
+  const glyphCanvases = {};
+  GLYPHS.forEach((ch) => { const c = canvas(128, 128); drawGlyph(c, ch); glyphCanvases[ch] = c; glyphTex[ch] = new THREE.CanvasTexture(c); });
+  if (document.fonts && document.fonts.load) {
+    Promise.all([document.fonts.load('700 84px "Nanum Myeongjo"', "마법별빛"), document.fonts.load('600 44px "Cinzel"', "A")])
+      .then(() => GLYPHS.forEach((ch) => { drawGlyph(glyphCanvases[ch], ch); glyphTex[ch].needsUpdate = true; }))
+      .catch(() => {});
+  }
+  const letters = [];
+  for (let i = 0; i < 80; i++) {
+    const ch = GLYPHS[Math.floor(rand() * GLYPHS.length)];
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: glyphTex[ch], transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 }));
+    sp.visible = false; scene.add(sp);
+    const life = rr(2.6, 4.4);
+    letters.push({
+      sp, life,
+      birth: T.dust + 0.05 + (rand() < 0.5 ? rr(0, 0.4) : rr(0, life)),
+      r0: rr(0.15, 1.0), a0: rr(0, Math.PI * 2), speed: rr(0.9, 1.7), spin: rr(1.1, 2.1),
+      size: rr(0.2, 0.38), rot: rr(-2, 2),
+    });
+  }
+  function updateLetters(t, boost) {
+    for (const L of letters) {
+      const tt = t - L.birth;
+      if (tt < 0) { L.sp.visible = false; continue; }
+      const lt = tt % L.life, p = lt / L.life;
+      const y = 0.25 + lt * L.speed * (1 + 0.3 * p);
+      const ang = L.a0 + lt * L.spin + y * 0.8;
+      const r = L.r0 * (1 - 0.3 * Math.min(1, p * 4)) + y * 0.3;
+      L.sp.visible = true;
+      L.sp.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
+      const a = Math.min(1, p / 0.08) * (1 - clamp((p - 0.6) / 0.4, 0, 1));
+      L.sp.material.opacity = a * 0.95;
+      L.sp.material.rotation = L.rot * lt;
+      const s = L.size * (1 - 0.35 * p) * (0.9 + 0.2 * boost) * Math.min(1, p / 0.12 + 0.4);
+      L.sp.scale.set(s, s, s);
+    }
+  }
+
+  /* ---- 지팡이 ---- */
+  const wand = new THREE.Group(); scene.add(wand);
+  const WL = 3.2;
+  {
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x5b3a22, roughness: 0.55, metalness: 0.05 });
+    const gripMat = new THREE.MeshStandardMaterial({ color: 0x2b1a10, roughness: 0.7 });
+    const goldMat = new THREE.MeshStandardMaterial({ color: 0xe0b457, roughness: 0.3, metalness: 0.85 });
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.05, WL, 20), woodMat); shaft.position.y = WL / 2;
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.062, 0.9, 20), gripMat); grip.position.y = 0.45;
+    wand.add(shaft, grip);
+    [0.92, 1.0, 0.05].forEach((y) => { const ring = new THREE.Mesh(new THREE.TorusGeometry(0.058, 0.012, 8, 24), goldMat); ring.rotation.x = Math.PI / 2; ring.position.y = y; wand.add(ring); });
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.14, 16), goldMat); cap.position.y = WL + 0.02; wand.add(cap);
+  }
+  // 별 보석
+  const gemMat = new THREE.MeshStandardMaterial({ color: 0xffe08a, emissive: new THREE.Color(0xffa820), emissiveIntensity: 0.6, metalness: 0.55, roughness: 0.22 });
+  const gem = new THREE.Group(); scene.add(gem);
+  {
+    const sh = new THREE.Shape();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? 0.2 : 0.085, a = Math.PI / 2 + (i * Math.PI) / 5;
+      i === 0 ? sh.moveTo(Math.cos(a) * r, Math.sin(a) * r) : sh.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: 0.045, bevelEnabled: true, bevelThickness: 0.035, bevelSize: 0.022, bevelSegments: 3 });
+    g.center();
+    const m = new THREE.Mesh(g, gemMat); m.name = "star"; gem.add(m);
+  }
+  const additive = (map, color) => new THREE.Sprite(new THREE.SpriteMaterial({ map, color, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending, opacity: 0 }));
+  const gemGlow = additive(makeGlowTexture(), 0xffd98a);
+  const gemRays = additive(makeRaysTexture(), 0xfff0c0);
+  const shock = additive(makeRingTexture(), 0xffe2a0);
+  gemGlow.renderOrder = gemRays.renderOrder = shock.renderOrder = 10;
+  scene.add(gemGlow, gemRays, shock);
+
+  const handleStart = new THREE.Vector3(5.6, -2.6, 5.2);
+  const handleEnd = new THREE.Vector3(3.3, 0.1, 3.9);
+  const tipAim = new THREE.Vector3(1.55, 2.35, 2.0);
+  const Y = new THREE.Vector3(0, 1, 0);
+  const tmpDir = new THREE.Vector3(), tipPos = new THREE.Vector3(), handlePos = new THREE.Vector3();
+
+  function flashCurve(t) {
+    const d = t - T.flash;
+    if (d < 0) return 0;
+    if (d < 0.07) return d / 0.07;
+    if (d < 0.15) return 1;
+    return Math.exp(-(d - 0.15) * 2.0);
+  }
+
+  function updateWand(t) {
+    const e = ease.outCubic(seg(t, T.wandIn, T.wandIn + 0.75));
+    handlePos.lerpVectors(handleStart, handleEnd, e);
+    const charge = seg(t, T.charge, T.flash);
+    const d = t - T.flash;
+    // 충전 중 살짝 들어올렸다가 번쩍일 때 휙 내리침
+    const lift = ease.inOutSine(charge) * 0.35;
+    const flick = d > 0 ? Math.exp(-d * 6) * Math.sin(d * 22) * 0.35 : 0;
+    const sway = 0.05 * Math.sin(t * 1.8) * e;
+    tmpDir.copy(tipAim).sub(handleEnd).normalize();
+    tmpDir.y += lift - (d > 0 ? 0.25 * Math.exp(-d * 5) : 0) + flick * 0.4 + sway;
+    tmpDir.x += flick * 0.2;
+    tmpDir.normalize();
+    wand.position.copy(handlePos);
+    wand.quaternion.setFromUnitVectors(Y, tmpDir);
+    wand.visible = t > T.wandIn - 0.05;
+
+    tipPos.copy(handlePos).addScaledVector(tmpDir, WL + 0.2);
+    gem.position.copy(tipPos);
+    gem.quaternion.copy(camera.quaternion);
+    gem.rotateZ(t * 0.8 + (d > 0 ? Math.exp(-d * 3) * 6 : 0));
+    gem.visible = wand.visible;
+    const pop = 1 + (d > 0 ? Math.exp(-d * 5) * 0.6 : 0) + charge * 0.15;
+    gem.scale.setScalar(pop);
+
+    const f = flashCurve(t);
+    const pulse = 0.5 + 0.5 * Math.sin(t * (8 + 34 * charge));
+    gemMat.emissiveIntensity = 0.6 + charge * (2 + 2.5 * pulse) + f * 3 + (d > 0 ? 0.8 : 0);
+
+    gemGlow.position.copy(tipPos); gemRays.position.copy(tipPos); shock.position.copy(tipPos);
+    gemGlow.material.opacity = wand.visible ? clamp(0.35 + charge * 0.5 + f, 0, 1) : 0;
+    gemGlow.scale.setScalar(0.7 + charge * (1.0 + 0.5 * pulse) + f * 3.5 + (d > 0 ? 0.4 : 0));
+    gemRays.material.opacity = clamp(charge * 0.5 * pulse + f * 0.6 + (d > 0 ? 0.2 : 0), 0, 1);
+    gemRays.material.rotation = t * 0.6;
+    gemRays.scale.setScalar(0.8 + charge * 0.8 + f * 6 + (d > 0 ? 0.8 : 0));
+    if (d > 0 && d < 1.2) {
+      const q = d / 1.2;
+      shock.material.opacity = (1 - q) * 0.5;
+      shock.scale.setScalar(0.5 + ease.outQuart(q) * 16);
+    } else shock.material.opacity = 0;
+
+    gemLight.position.copy(tipPos);
+    gemLight.intensity = (wand.visible ? 0.4 + charge * 2.5 * pulse + f * 10 + (d > 0 ? 1.0 : 0) : 0) * PLI;
+    return { charge, f };
+  }
+
+  /* ---- 번쩍임 파편 ---- */
+  const BN = 700;
+  const burstGeo = new THREE.BufferGeometry();
+  {
+    const pos = new Float32Array(BN * 3), aDir = new Float32Array(BN * 3), aSpeed = new Float32Array(BN),
+      aSize = new Float32Array(BN), aColor = new Float32Array(BN * 3), aDelay = new Float32Array(BN);
+    for (let i = 0; i < BN; i++) {
+      const u = rr(-1, 1), th = rr(0, Math.PI * 2), s = Math.sqrt(1 - u * u);
+      aDir.set([s * Math.cos(th), u, s * Math.sin(th)], i * 3);
+      aSpeed[i] = rr(2, 9); aSize[i] = rr(0.07, 0.22); aDelay[i] = rr(0, 0.12);
+      aColor.set(rand() < 0.7 ? PALETTE[1] : PALETTE[0], i * 3);
+    }
+    burstGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    burstGeo.setAttribute("aDir", new THREE.BufferAttribute(aDir, 3));
+    burstGeo.setAttribute("aSpeed", new THREE.BufferAttribute(aSpeed, 1));
+    burstGeo.setAttribute("aSize", new THREE.BufferAttribute(aSize, 1));
+    burstGeo.setAttribute("aColor", new THREE.BufferAttribute(aColor, 3));
+    burstGeo.setAttribute("aDelay", new THREE.BufferAttribute(aDelay, 1));
+  }
+  const burstMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: -1 }, uPR: { value: PR }, uOrigin: { value: new THREE.Vector3() } },
+    vertexShader: burstVert, fragmentShader: starFrag,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const burst = new THREE.Points(burstGeo, burstMat); burst.frustumCulled = false; scene.add(burst);
+
+  /* ---- 후처리 (블룸) ---- */
+  let composer = null, bloom = null;
+  try {
+    composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    bloom = new UnrealBloomPass(new THREE.Vector2(512, 512), 0.65, 0.5, 0.5);
+    composer.addPass(bloom);
+  } catch (err) { composer = null; bloom = null; }
+
+  /* ---- 리사이즈 ---- */
+  function resize() {
+    const w = mount.clientWidth || window.innerWidth, h = mount.clientHeight || window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camFactor = camera.aspect < 1 ? 1.15 + (1 - camera.aspect) * 1.5 : 1;
+    camera.position.copy(camBase).sub(camTarget).multiplyScalar(camFactor).add(camTarget);
+    camera.lookAt(camTarget);
+    camera.updateProjectionMatrix();
+    if (composer) { composer.setPixelRatio && composer.setPixelRatio(PR); composer.setSize(w, h); }
+  }
+  resize();
+  const ro = new ResizeObserver(resize); ro.observe(mount);
+
+  /* ---- 루프 ---- */
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let simTime = 0, speed = reduceMotion ? 0.5 : 1, last = performance.now(), raf = 0, phase = -1;
+  const proj = new THREE.Vector3();
+  const camShake = new THREE.Vector3();
+
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    simTime += dt * speed;
+    const t = simTime;
+
+    updateBook(t);
+    const { charge, f } = updateWand(t);
+    const after = seg(t, T.flash, T.flash + 0.6);
+    const boost = 1 + after * 0.35 + f * 0.4;
+    vortexMat.uniforms.uTime.value = t;
+    vortexMat.uniforms.uBoost.value = boost;
+    updateLetters(t, boost);
+    burstMat.uniforms.uTime.value = t - T.flash;
+    burstMat.uniforms.uOrigin.value.copy(tipPos);
+
+    // 화면 전체가 밝아지는 여운
+    scene.background.copy(bgDark).lerp(bgLit, clamp(after * 0.55 + f * 0.2, 0, 1));
+    scene.fog.color.copy(scene.background);
+    ambient.intensity = (0.4 + after * 0.2 + f * 0.45) * LI;
+    renderer.toneMappingExposure = 0.95 + f * 0.3 + after * 0.03;
+    if (bloom) bloom.strength = 0.65 + charge * 0.35 + f * 1.1 + after * 0.1;
+
+    // 카메라: 살짝 떠오르며 번쩍일 때 흔들림
+    const d = t - T.flash;
+    const shake = d > 0 ? Math.exp(-d * 5) * 0.06 : 0;
+    camShake.set(Math.sin(t * 61) * shake, Math.cos(t * 53) * shake, 0);
+    const drift = 0.25 * ease.inOutSine(seg(t, T.open, T.flash + 2));
+    camera.position.copy(camBase).sub(camTarget).multiplyScalar(camFactor * (1 - drift * 0.12)).add(camTarget).add(camShake);
+    camera.position.y += drift * 0.3;
+    camera.lookAt(camTarget.x, camTarget.y + drift * 0.35, camTarget.z);
+
+    // 섬광 오버레이 위치/투명도
+    if (opts.flashEl) {
+      proj.copy(tipPos).project(camera);
+      opts.flashEl.style.setProperty("--fx", ((proj.x * 0.5 + 0.5) * 100).toFixed(1) + "%");
+      opts.flashEl.style.setProperty("--fy", ((-proj.y * 0.5 + 0.5) * 100).toFixed(1) + "%");
+      opts.flashEl.style.opacity = (f * 0.45).toFixed(3);
+    }
+
+    const ph = t < T.open ? 0 : t < T.dust + 0.3 ? 1 : t < T.charge ? 2 : t < T.flash ? 3 : 4;
+    if (ph !== phase) { phase = ph; opts.onPhase && opts.onPhase(ph); }
+
+    if (composer) composer.render(); else renderer.render(scene, camera);
+  }
+  raf = requestAnimationFrame(frame);
+
+  return {
+    restart() { simTime = 0; last = performance.now(); },
+    setSpeed(s) { speed = s; },
+    dispose() {
+      cancelAnimationFrame(raf); ro.disconnect();
+      if (composer && composer.dispose) composer.dispose();
+      renderer.dispose();
+      if (CM && prevCM !== undefined) { if ("enabled" in CM) CM.enabled = prevCM; else CM.legacyMode = prevCM; }
+      if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
+    },
+  };
+}
+
+/* ================= React 컴포넌트 ================= */
+const CAPTIONS = [
+  "마법서가 나타납니다",
+  "책이 빠르게 펼쳐집니다",
+  "별가루와 글자 조각이 회오리치며 솟아오릅니다",
+  "지팡이 끝의 별 보석에 빛이 모입니다",
+  "별이 번쩍이며 온 세상을 밝힙니다",
+];
+
+const STYLES = `@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Nanum+Myeongjo:wght@700;800&display=swap");
+.mb-root {
+  --night: #060a1c; --gilt: #e8c46a; --starlight: #fff4d6;
+  --chip-bg: rgba(8, 13, 34, 0.6); --chip-line: rgba(232, 196, 106, 0.35);
+  --text: #f6ecd0; --text-dim: rgba(246, 236, 208, 0.55);
+  inset: 0; overflow: hidden; box-sizing: border-box;
+  background: var(--night); color: var(--text);
+  font-family: "Nanum Myeongjo", "Apple SD Gothic Neo", "Malgun Gothic", serif;
+}
+.mb-root.is-fullscreen { position: fixed; z-index: 1000; }
+.mb-root.is-inline { position: absolute; }
+.mb-root *, .mb-root *::before, .mb-root *::after { box-sizing: border-box; }
+.mb-stage { position: absolute; inset: 0; cursor: pointer; }
+.mb-stage canvas { display: block; width: 100% !important; height: 100% !important; }
+.mb-flash {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  background: radial-gradient(circle at var(--fx, 70%) var(--fy, 50%),
+    #fff6d8 0%, #ffd98a 20%, rgba(255, 190, 90, 0.45) 55%, rgba(255, 170, 80, 0.12) 100%);
+  mix-blend-mode: screen;
+}
+.mb-caption {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 84px);
+  text-align: center; pointer-events: none; width: min(90vw, 560px);
+}
+.mb-caption p {
+  margin: 0; font-size: clamp(17px, 2.4vw, 22px); letter-spacing: 0.02em;
+  text-shadow: 0 0 18px rgba(255, 200, 110, 0.55);
+}
+.mb-timeline { display: flex; justify-content: center; gap: 10px; margin-top: 14px; }
+.mb-timeline span { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--gilt); transition: background 0.3s, box-shadow 0.3s; }
+.mb-timeline span.on { background: var(--gilt); box-shadow: 0 0 10px var(--gilt); }
+.mb-controls {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  display: flex; gap: 10px;
+}
+.mb-controls button {
+  font: inherit; font-size: 14px; color: var(--text);
+  background: var(--chip-bg); border: 1px solid var(--chip-line);
+  padding: 9px 18px; border-radius: 999px; cursor: pointer;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  transition: border-color 0.2s, background 0.2s;
+}
+.mb-controls button:hover { border-color: var(--gilt); }
+.mb-controls button[aria-pressed="true"] { background: rgba(232, 196, 106, 0.22); border-color: var(--gilt); }
+.mb-controls button:focus-visible { outline: 2px solid var(--starlight); outline-offset: 3px; }
+.mb-title {
+  position: absolute; top: calc(env(safe-area-inset-top, 0px) + 20px); left: 24px;
+  font-family: "Cinzel", Georgia, serif; font-size: 13px; letter-spacing: 0.18em;
+  color: var(--text-dim); pointer-events: none;
+}
+.mb-error { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; }
+`;
+
+export default function MagicBook({
+  fullscreen = true,
+  showCaptions = true,
+  showControls = true,
+  showTitle = true,
+  onPhase,
+}) {
+  const mountRef = useRef(null);
+  const flashRef = useRef(null);
+  const apiRef = useRef(null);
+  const onPhaseRef = useRef(onPhase);
+  const [phase, setPhase] = useState(0);
+  const [slow, setSlow] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => { onPhaseRef.current = onPhase; }, [onPhase]);
+
+  useEffect(() => {
+    try {
+      apiRef.current = createMagicScene(mountRef.current, {
+        flashEl: flashRef.current,
+        onPhase: (p) => { setPhase(p); if (onPhaseRef.current) onPhaseRef.current(p); },
+      });
+    } catch (e) {
+      setError("WebGL을 시작하지 못했습니다. 하드웨어 가속을 켠 브라우저에서 열어 주세요.");
+    }
+    return () => {
+      if (apiRef.current) apiRef.current.dispose();
+      apiRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => { if (apiRef.current) apiRef.current.setSpeed(slow ? 0.3 : 1); }, [slow]);
+
+  const replay = () => { if (apiRef.current) apiRef.current.restart(); };
+
+  return (
+    <div className={"mb-root " + (fullscreen ? "is-fullscreen" : "is-inline")}>
+      <style>{STYLES}</style>
+      <div
+        ref={mountRef}
+        className="mb-stage"
+        onClick={replay}
+        role="img"
+        aria-label="마법서 애니메이션. 클릭하면 다시 재생합니다"
+      />
+      <div ref={flashRef} className="mb-flash" />
+      {showTitle && <div className="mb-title">Liber Stellarum</div>}
+      {error ? (
+        <div className="mb-error">{error}</div>
+      ) : (
+        showCaptions && (
+          <div className="mb-caption" aria-live="polite">
+            <p>{CAPTIONS[phase]}</p>
+            <div className="mb-timeline">
+              {CAPTIONS.map((_, i) => <span key={i} className={i <= phase ? "on" : ""} />)}
+            </div>
+          </div>
+        )
+      )}
+      {showControls && (
+        <div className="mb-controls">
+          <button onClick={replay}>다시 재생</button>
+          <button onClick={() => setSlow((s) => !s)} aria-pressed={slow}>느리게 보기</button>
+        </div>
+      )}
+    </div>
+  );
+}
