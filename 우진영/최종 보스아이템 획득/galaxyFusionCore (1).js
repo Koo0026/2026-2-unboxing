@@ -11,16 +11,17 @@ import * as THREE from 'three';
  * 모든 머티리얼을 ShaderMaterial로 작성해 three 버전별 색공간 차이에 영향받지 않음.
  * ========================================================================== */
 
+// 최종 아이템은 처음에 숨겨 두고, 아이템 4개가 하나씩 등장 → 가운데로 모임 → 섬광과 함께 최종 아이템 등장
 const TL = {
-  checkStart: 0.35, checkGap: 0.28,          // 아이템 4/4 체크
-  flyStart: 1.8, flyEnd: 3.2,                 // 보물 패널 → 중앙
-  gatherStart: 2.0, gatherEnd: 3.2,           // 아이템 → 합체 위치
-  chargeStart: 3.2,                           // 아이템 충전
-  beamStart: 3.9, beamGap: 0.16, beamGrow: 0.38,
-  absorbStart: 5.3, absorbGap: 0.09, absorbDur: 0.85,
-  flash: 6.35,
-  complete: 6.5,                              // 완료 문구
-  done: 7.4,                                  // onComplete (성우 음성·왕관 연결 지점)
+  appearStart: 0.4, appearGap: 0.5, appearDur: 0.55, // 아이템이 하나씩 등장
+  gatherStart: 2.6, gatherEnd: 3.6,           // 아이템 → 합체 위치 (가운데 주변)
+  chargeStart: 3.6,                           // 아이템 충전
+  beamStart: 4.2, beamGap: 0.16, beamGrow: 0.38,
+  absorbStart: 5.5, absorbGap: 0.09, absorbDur: 0.85,
+  flash: 6.55,                                // 최종 아이템 등장
+  reveal: 0.6,                                // 섬광 뒤 최종 아이템이 커지는 시간
+  complete: 6.7,                              // 완료 문구
+  done: 7.6,                                  // onComplete (성우 음성·왕관 연결 지점)
 };
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
@@ -110,18 +111,6 @@ function raysCanvas() {
   return c;
 }
 
-function titleCanvas(text) {
-  const c = document.createElement('canvas'); const g = c.getContext('2d');
-  const font = '64px "Jua", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
-  g.font = font; const w = Math.ceil(g.measureText(text).width) + 48;
-  c.width = w; c.height = 96; g.font = font; g.textBaseline = 'middle'; g.textAlign = 'center';
-  g.shadowColor = 'rgba(255,190,90,0.7)'; g.shadowBlur = 16;
-  const grd = g.createLinearGradient(0, 16, 0, 80);
-  grd.addColorStop(0, '#fff3c4'); grd.addColorStop(1, '#f0b44c');
-  g.fillStyle = grd; g.fillText(text, w / 2, 50);
-  return c;
-}
-
 /* ==========================================================================
  * 효과음 엔진 (Web Audio API로 실시간 합성 — 음원 파일 불필요)
  * 광선 4개는 A장조 화음(A3·C#4·E4·A4)으로 쌓여 합체 순간 하나의 코드로 완성됨
@@ -176,7 +165,7 @@ function createFusionAudio(onState) {
   }
 
   const NOTES = [220, 277.18, 329.63, 440];      // 아이템별 광선 음 (A장조)
-  const PANS = [-0.55, 0.55, -0.55, 0.55];         // 좌상·우상·좌하·우하
+  const PANS = [-0.55, -0.55, 0.55, 0.55];         // 좌상·좌하·우하·우상 (합체 자리 순서)
 
   const api = {
     get state() { return ctx.state; },
@@ -191,7 +180,7 @@ function createFusionAudio(onState) {
       sources = []; newBus();
     },
 
-    /** 벨 소리 (아이템 체크, 명중, 반짝임) */
+    /** 벨 소리 (아이템 등장, 명중, 반짝임) */
     ping(freq, vol = 0.2, pan = 0, t0 = now(), send = 0.5, dur = 1.1) {
       const g = gain(); g.gain.setValueAtTime(E, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + 0.006); g.gain.exponentialRampToValueAtTime(E, t0 + dur);
       [[1, 'triangle', 1], [2.76, 'sine', 0.35], [5.4, 'sine', 0.12]].forEach(([m, type, a]) => {
@@ -200,7 +189,7 @@ function createFusionAudio(onState) {
       out(g, pan, send);
     },
 
-    /** 바람 가르는 소리 (지팡이 비행) — 오른쪽 패널에서 중앙으로 팬 이동 */
+    /** 바람 가르는 소리 (아이템이 가운데로 모일 때) — panFrom 쪽에서 중앙으로 팬 이동 */
     whoosh(dur, vol = 0.45, fLo = 250, fHi = 2600, panFrom = 0.8) {
       const t0 = now(), n = noise(), bp = filter('bandpass', fLo, 1.1), g = gain();
       bp.frequency.setValueAtTime(fLo, t0); bp.frequency.exponentialRampToValueAtTime(fHi, t0 + dur * 0.6); bp.frequency.exponentialRampToValueAtTime(fLo * 1.6, t0 + dur);
@@ -418,33 +407,10 @@ export function createGalaxyFusion(container, opts) {
   }));
   const stars = new THREE.Points(starGeo, starMat); stars.renderOrder = 1; stars.frustumCulled = false; scene.add(stars);
 
-  /* ---------- 패널 ---------- */
-  const panelMat = () => track(new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: new THREE.Vector2(1, 1) }, uPad: { value: 0.4 }, uOpacity: { value: 1 }, uTime: { value: 0 } },
-    vertexShader: VERT,
-    fragmentShader: `uniform vec2 uSize; uniform float uPad, uOpacity, uTime; varying vec2 vUv;
-      void main(){
-        vec2 p = (vUv - 0.5) * (uSize + uPad);
-        float r = 0.18; vec2 b = uSize * 0.5 - r;
-        vec2 q = abs(p) - b; float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-        float fill = 1.0 - smoothstep(-0.01, 0.01, d);
-        float border = exp(-pow(d / 0.018, 2.0));
-        float inner = exp(-pow((d + 0.07) / 0.008, 2.0)) * 0.5;
-        float glow = exp(-max(d, 0.0) * 10.0) * (1.0 - fill);
-        vec3 gold = vec3(0.95, 0.72, 0.36);
-        vec3 col = vec3(0.07, 0.04, 0.16) * fill + gold * (border + inner) + vec3(0.55, 0.35, 0.9) * glow * 0.35;
-        float a = fill * 0.72 + border + inner + glow * 0.3;
-        gl_FragColor = vec4(col / max(a, 0.001), clamp(a, 0.0, 1.0) * uOpacity);
-      }`,
-    transparent: true, depthWrite: false, depthTest: false,
-  }));
-  const panels = [mesh(panelMat(), 2), mesh(panelMat(), 2)];
-
   /* ---------- 텍스처 ---------- */
   const glowTex = track(makeCanvasTexture(THREE, glowCanvas()));
   const circleTex = track(makeCanvasTexture(THREE, circleCanvas()));
   const raysTex = track(makeCanvasTexture(THREE, raysCanvas()));
-  let titleTexs = []; // [0/4..4/4, 보물]
 
   /* ---------- 빔 ---------- */
   const beamMat = (color) => track(new THREE.ShaderMaterial({
@@ -536,7 +502,7 @@ export function createGalaxyFusion(container, opts) {
 
   /* ---------- 오브젝트 (텍스처 로드 후 생성) ---------- */
   let ready = false;
-  let staff, staffGlow, circleA, circleB, rays, flash, titles = [], items = [], rings = [], orbs = [];
+  let staff, staffGlow, circleA, circleB, rays, flash, items = [], rings = [], orbs = [];
   const STAFF_TINT = [0.82, 0.7, 1.0];
   // 지팡이 카드 안 수정(은하) 위치 — 카드 로컬 좌표 비율
   const CRYSTAL = { u: 0.36, v: 0.28 };
@@ -550,40 +516,31 @@ export function createGalaxyFusion(container, opts) {
   let L = null; // layout
   let W = 1, H = 1;
 
+  // 합체 자리: 좌상 → 좌하 → 우하 → 우상 (등장 순서대로 돌아가며 놓여 이동 경로가 겹치지 않음)
+  const RING = [[-1, 1], [-1, -1], [1, -1], [1, 1]];
+
   function computeLayout() {
     const land = W / H >= 1.05;
-    const m = Math.min(W, H) * 0.045;
-    const itemAsp = items.map((it) => it.aspect);
     const staffAsp = staff.aspect;
-    const lay = { land, inv: [], fus: [], panels: [], titles: [] };
+    const lay = { land, inv: [], fus: [] };
     if (land) {
-      const pw = W * 0.25, px = -W / 2 + m + pw / 2, py = -H * 0.04;
-      let iw = pw * 0.44;
-      const ihMax = (H * 0.6) / 2.5; if (iw / 1.08 > ihMax) iw = ihMax * 1.08;
-      const ih = iw / 1.08;
-      const ph = 2 * ih * 1.22 + H * 0.13;
-      [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([sx, sy], i) => lay.inv.push({ x: px + sx * iw * 0.56, y: py - H * 0.035 + sy * ih * 0.6, w: iw }));
-      const tw = W * 0.3, th = Math.min(H * 0.46, (tw * 0.9) / staffAsp + H * 0.13), tx = W / 2 - m - tw / 2, ty = py;
-      lay.treasure = { x: tx, y: ty - H * 0.02, w: tw * 0.86 };
-      lay.panels = [{ x: px, y: py, w: pw, h: ph }, { x: tx, y: ty, w: tw, h: th }];
-      lay.titles = [{ x: px, y: py + ph / 2 - H * 0.055, h: H * 0.052 }, { x: tx, y: ty + th / 2 - H * 0.055, h: H * 0.052 }];
+      // 등장: 화면 가운데 한 줄
+      const iw = Math.min(W * 0.15, H * 0.3);
+      for (let i = 0; i < 4; i++) lay.inv.push({ x: (i - 1.5) * iw * 1.4, y: H * 0.02, w: iw });
       const sw = Math.min(W * 0.5, H * 0.46 * staffAsp);
       lay.staff = { x: 0, y: -H * 0.01, w: sw };
-      const fw = Math.min(W * 0.125, H * 0.25);
-      const dx = sw / 2 + fw * 0.8, dy = H * 0.27;
-      [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([sx, sy]) => lay.fus.push({ x: sx * dx, y: lay.staff.y + sy * dy, w: fw }));
+      // 합체: 최종 아이템이 나타날 자리를 둘러쌈
+      const fw = Math.min(W * 0.11, H * 0.22);
+      const dx = Math.min(W * 0.2, sw * 0.42), dy = H * 0.2;
+      RING.forEach(([sx, sy]) => lay.fus.push({ x: sx * dx, y: lay.staff.y + sy * dy, w: fw }));
     } else {
-      const pw = W - 2 * m, ph = H * 0.2, px = 0, py = H / 2 - m - ph / 2;
-      const iw = Math.min(pw * 0.215, ph * 0.66 * 1.08);
-      for (let i = 0; i < 4; i++) lay.inv.push({ x: (i - 1.5) * iw * 1.12, y: py - ph * 0.1, w: iw });
-      const th = H * 0.22, ty = -H / 2 + m + th / 2;
-      lay.treasure = { x: 0, y: ty - th * 0.08, w: Math.min(pw * 0.8, th * 0.66 * staffAsp) };
-      lay.panels = [{ x: px, y: py, w: pw, h: ph }, { x: 0, y: ty, w: pw, h: th }];
-      lay.titles = [{ x: px, y: py + ph / 2 - H * 0.03, h: H * 0.03 }, { x: 0, y: ty + th / 2 - H * 0.03, h: H * 0.03 }];
+      // 등장: 화면 가운데 2×2 (RING 순서로 돌아가며)
+      const iw = W * 0.34;
+      RING.forEach(([sx, sy]) => lay.inv.push({ x: sx * W * 0.25, y: sy * H * 0.17, w: iw }));
       const sw = W * 0.9;
       lay.staff = { x: 0, y: 0, w: sw };
-      const fw = W * 0.27, sh = sw / staffAsp, fh = fw / 1.08;
-      [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([sx, sy]) => lay.fus.push({ x: sx * W * 0.24, y: sy * (sh / 2 + fh * 0.95), w: fw }));
+      const fw = W * 0.2;
+      RING.forEach(([sx, sy]) => lay.fus.push({ x: sx * W * 0.22, y: sy * H * 0.12, w: fw }));
     }
     return lay;
   }
@@ -600,12 +557,12 @@ export function createGalaxyFusion(container, opts) {
   /* ---------- 타임라인 상태 ---------- */
   let t = 0, speed = 1, last = performance.now(), raf = 0, disposed = false;
   let fired = {}, emittedPhase = '';
-  const phaseAt = (tt) => (tt >= TL.complete ? 'complete' : tt >= TL.beamStart ? 'fusion' : tt >= TL.flyStart ? 'summon' : 'ready');
+  const phaseAt = (tt) => (tt >= TL.complete ? 'complete' : tt >= TL.beamStart ? 'fusion' : tt >= TL.gatherStart ? 'summon' : 'ready');
 
   function play() {
     t = 0; fired = {}; emittedPhase = ''; clearParticles();
     if (audio) audio.stopAll();
-    items.forEach((it) => { it.checked = false; });
+    items.forEach((it) => { it.shown = false; });
   }
 
   function staffWorld(s) { // 카드 로컬(u,v) → 월드
@@ -637,9 +594,8 @@ export function createGalaxyFusion(container, opts) {
     };
     {
       const S = 1 / speed;
-      [659.25, 830.61, 987.77, 1318.51].forEach((f, i) => cue('a_chk' + i, TL.checkStart + i * TL.checkGap, () => audio.ping(f, 0.18, L && L.land ? -0.6 : 0)));
-      cue('a_fly', TL.flyStart, () => audio.whoosh((TL.flyEnd - TL.flyStart) * S, 0.45, 250, 2600, L && L.land ? 0.8 : 0));
-      cue('a_gather', TL.gatherStart + 0.1, () => audio.whoosh((TL.gatherEnd - TL.gatherStart) * S, 0.14, 700, 5000, L && L.land ? -0.6 : 0));
+      [659.25, 830.61, 987.77, 1318.51].forEach((f, i) => cue('a_show' + i, TL.appearStart + i * TL.appearGap, () => audio.ping(f, 0.2, L.land ? (i - 1.5) * 0.35 : 0)));
+      cue('a_gather', TL.gatherStart, () => audio.whoosh((TL.gatherEnd - TL.gatherStart) * S, 0.35, 300, 3200, 0));
       cue('a_charge', TL.chargeStart, () => audio.charge((TL.absorbStart - TL.chargeStart) * S));
       for (let i = 0; i < 4; i++) {
         const bs = TL.beamStart + i * TL.beamGap;
@@ -651,72 +607,49 @@ export function createGalaxyFusion(container, opts) {
       cue('a_arp', TL.complete + 0.15, () => audio.arpeggio());
     }
 
-    /* 패널 & 타이틀 */
-    const panelA = 1 - easeInOut(seg(t, TL.flyStart - 0.1, TL.flyStart + 0.7));
-    L.panels.forEach((p, i) => {
-      const m = panels[i]; const pad = 0.4;
-      m.position.set(p.x, p.y, 0); m.scale.set(p.w + pad, p.h + pad, 1);
-      m.material.uniforms.uSize.value.set(p.w, p.h); m.material.uniforms.uPad.value = pad; m.material.uniforms.uOpacity.value = panelA;
-      m.visible = panelA > 0.001;
-    });
-    let count = 0; items.forEach((it, i) => { if (t >= TL.checkStart + i * TL.checkGap) count++; });
-    titles.forEach((m, i) => {
-      const lt = L.titles[i]; const tex = i === 0 ? titleTexs[count] : titleTexs[5];
-      m.material.uniforms.uMap.value = tex.tex;
-      m.position.set(lt.x, lt.y, 0.01); m.scale.set(lt.h * tex.asp, lt.h, 1);
-      m.material.uniforms.uOpacity.value = panelA; m.visible = panelA > 0.001;
-    });
-
-    /* 지팡이 비행 */
-    const fp = easeInOut(seg(t, TL.flyStart, TL.flyEnd));
-    const s0 = L.treasure, s1 = L.staff;
-    const cx = (s0.x + s1.x) / 2, cy = Math.max(s0.y, s1.y) + H * (L.land ? 0.3 : 0.12);
-    const bx = (1 - fp) * (1 - fp) * s0.x + 2 * (1 - fp) * fp * cx + fp * fp * s1.x;
-    const by = (1 - fp) * (1 - fp) * s0.y + 2 * (1 - fp) * fp * cy + fp * fp * s1.y;
-    const arc = Math.sin(fp * Math.PI);
+    /* 최종 아이템 — 섬광 전까지 숨김, 섬광과 함께 튀어나오듯 등장 */
+    const s1 = L.staff;
     const tFlash = t - TL.flash;
-    const punch = tFlash > 0 ? 1 + 0.22 * Math.exp(-4.5 * tFlash) * Math.cos(11 * tFlash) : 1;
-    const bob = t > TL.flash ? Math.sin(time * 1.6) * H * 0.008 : (t < TL.flyStart ? Math.sin(time * 2) * H * 0.003 : 0);
-    placeCard(staff, bx, by + bob, lerp(s0.w, s1.w, fp) * punch, arc * 1.4);
-    staff.mesh.rotation.set(0, Math.sin(fp * Math.PI) * 0.45 * (fp < 0.5 ? 1 : -0.4), (1 - fp) * 0 + Math.sin(fp * Math.PI) * -0.12);
+    const revealed = tFlash >= 0;
+    const rv = seg(t, TL.flash, TL.flash + TL.reveal);
+    const bob = revealed ? Math.sin(time * 1.6) * H * 0.008 : 0;
+    placeCard(staff, s1.x, s1.y + bob, s1.w * Math.max(0.001, easeOutBack(rv)), 1.4 * (1 - easeOut(rv)));
+    staff.mesh.rotation.set(0, (1 - easeOut(rv)) * 0.6, 0);
+    staff.mesh.visible = revealed;
 
-    // 지팡이 발광
+    // 합체 중심(최종 아이템이 나타날 자리)의 에너지 → 등장 후에는 지팡이 수정의 발광
     let hits = 0;
     items.forEach((_, i) => { if (t >= TL.beamStart + i * TL.beamGap + TL.beamGrow) hits++; });
-    let sg = 0.05 + (t >= TL.flyStart && t < TL.flyEnd ? 0.25 * arc : 0) + hits * 0.12;
+    let sg = 0.05 + hits * 0.12;
     sg += 0.9 * easeIn(seg(t, TL.absorbStart, TL.flash));
-    if (tFlash > 0) sg = 0.3 + 1.3 * Math.exp(-3 * tFlash) + 0.08 * Math.sin(time * 3);
+    if (revealed) sg = 0.3 + 1.3 * Math.exp(-3 * tFlash) + 0.08 * Math.sin(time * 3);
     staff.mat.uniforms.uGlow.value = sg; staff.mat.uniforms.uTime.value = time;
-    staff.mat.uniforms.uWhite.value = tFlash > 0 ? 0.85 * Math.exp(-7 * tFlash) : 0.35 * easeIn(seg(t, TL.flash - 0.3, TL.flash));
+    staff.mat.uniforms.uWhite.value = revealed ? Math.exp(-5 * tFlash) : 0;
 
-    const target = staffWorld(staff);
-    const sH = staff.mesh.scale.y;
+    const core = { x: s1.x, y: s1.y };
+    const target = revealed ? staffWorld(staff) : core;
+    const sH = s1.w / staff.aspect;
     staffGlow.position.set(target.x, target.y, -0.1);
-    const sgScale = sH * (1.6 + sg * 1.2);
+    const sgScale = sH * (revealed ? 1.6 + sg * 1.2 : 0.6 + sg * 1.4);
     staffGlow.scale.set(sgScale, sgScale, 1);
-    staffGlow.material.uniforms.uOpacity.value = Math.min(1.4, 0.15 + sg * 0.7) * (t < TL.flyStart ? 0.6 : 1);
-
-    // 비행 궤적 파티클
-    if (t > TL.flyStart && t < TL.flyEnd + 0.1) {
-      for (let k = 0; k < 3; k++) spawn(target.x + (Math.random() - 0.5) * sH * 0.4, target.y + (Math.random() - 0.5) * sH * 0.4, 0.3,
-        (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * 0.6, 0, 0.9, 7 + Math.random() * 8,
-        [[0.75, 0.6, 1], [0.5, 0.8, 1], [1, 0.85, 0.6]][k], 1.5, -0.2);
-    }
+    staffGlow.material.uniforms.uOpacity.value = Math.min(1.4, 0.15 + sg * 0.7) * (revealed ? 1 : easeInOut(seg(t, TL.gatherStart, TL.gatherEnd)));
 
     /* 아이템 */
     items.forEach((it, i) => {
       const inv = L.inv[i], fu = L.fus[i];
-      const ct = TL.checkStart + i * TL.checkGap;
-      if (t >= ct && !it.checked) {
-        it.checked = true;
-        burst(inv.x, inv.y, 36, 0.8, 3.2, [it.color, [1, 1, 1]], 0.9, 9, 3);
+      const st = TL.appearStart + i * TL.appearGap;
+      if (t >= st && !it.shown) {
+        it.shown = true;
+        burst(inv.x, inv.y, 48, 0.8, 3.6, [it.color, [1, 1, 1]], 0.9, 10, 3);
       }
+      const pop = easeOutBack(seg(t, st, st + TL.appearDur));
       const gp = easeInOut(seg(t, TL.gatherStart + i * 0.07, TL.gatherEnd));
-      let x = lerp(inv.x, fu.x, gp), y = lerp(inv.y, fu.y, gp), w = lerp(inv.w, fu.w, gp);
+      let x = lerp(inv.x, fu.x, gp), y = lerp(inv.y, fu.y, gp), w = lerp(inv.w, fu.w, gp) * Math.max(0.001, pop);
       let z = Math.sin(gp * Math.PI) * 1.0;
-      let rotY = gp * Math.PI * 2, rotZ = 0;
-      let op = 1;
-      let glow = t >= ct ? 0.7 * Math.exp(-5 * (t - ct)) : 0;
+      let rotY = gp * Math.PI * 2, rotZ = (1 - Math.min(1, pop)) * 0.5 * (i % 2 ? 1 : -1);
+      let op = t >= st ? 1 : 0;
+      let glow = t >= st ? 0.9 * Math.exp(-4 * (t - st)) : 0;
+      if (t >= st) y += Math.sin(time * 2 + i) * H * 0.006 * (1 - gp); // 모이기 전까지 둥실
 
       // 충전
       const cp = seg(t, TL.chargeStart, TL.beamStart + i * TL.beamGap);
@@ -838,7 +771,6 @@ export function createGalaxyFusion(container, opts) {
 
   /* ---------- 초기화 ---------- */
   (async () => {
-    try { if (document.fonts && document.fonts.load) await Promise.race([document.fonts.load('64px "Jua"'), new Promise((r) => setTimeout(r, 1500))]); } catch (e) {}
     const [staffTex, ...itemTexs] = await Promise.all([load(images.staff), ...images.items.map((it) => load(it.src))]);
     if (disposed) return;
     const asp = (tx) => tx.image.width / tx.image.height;
@@ -850,7 +782,7 @@ export function createGalaxyFusion(container, opts) {
     rays = mesh(spriteMat(raysTex, [0.85, 0.75, 1.0]), 3);
 
     items = images.items.map((src, i) => {
-      const it = { aspect: asp(itemTexs[i]), color: src.color, checked: false, hit: false };
+      const it = { aspect: asp(itemTexs[i]), color: src.color, shown: false, hit: false };
       it.mat = cardMat(itemTexs[i], it.aspect, src.color);
       it.glow = mesh(spriteMat(glowTex, src.color), 7);
       it.mesh = mesh(it.mat, 8);
@@ -867,14 +799,6 @@ export function createGalaxyFusion(container, opts) {
       transparent: true, depthWrite: false, depthTest: false,
     }));
     flash = mesh(flashMat, 12); flash.position.z = 5; flash.scale.set(40, 30, 1); flash.visible = false;
-
-    const mkTitle = (s) => { const c = titleCanvas(s); return { tex: track(makeCanvasTexture(THREE, c)), asp: c.width / c.height }; };
-    titleTexs = [0, 1, 2, 3, 4].map((n) => mkTitle(`전설의 아이템 ${n}/4`)).concat([mkTitle('보물')]);
-    titles = [mesh(spriteMat(titleTexs[0].tex, [1, 1, 1]), 2), mesh(spriteMat(titleTexs[5].tex, [1, 1, 1]), 2)];
-    titles.forEach((m) => { m.material.blending = THREE.NormalBlending;
-      m.material.fragmentShader = `uniform sampler2D uMap; uniform vec3 uColor; uniform float uOpacity; varying vec2 vUv;
-        void main(){ vec4 t = texture2D(uMap, vUv); gl_FragColor = vec4(t.rgb * uColor, t.a * uOpacity); }`;
-      m.material.needsUpdate = true; });
 
     ready = true; resize(); play(); last = performance.now();
   })().catch((e) => { console.error(e); onPhase('error'); });

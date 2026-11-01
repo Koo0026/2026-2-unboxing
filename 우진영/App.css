@@ -30,7 +30,7 @@ body {
 .app {
   height: 100%;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   justify-items: center;
   background:
     radial-gradient(ellipse 60% 18% at 50% 88%, color-mix(in srgb, var(--floor) 80%, transparent), transparent 70%),
@@ -77,73 +77,17 @@ body {
 }
 .ghost:disabled { opacity: 0.4; cursor: default; }
 
-/* 입 모양 칸 */
-.spell {
-  display: flex;
-  gap: clamp(8px, 2.4vw, 18px);
-  padding: 10px 16px 0;
-}
-.slot {
-  width: clamp(76px, 20vw, 104px);
-  aspect-ratio: 1 / 1.12;
-  border-radius: 22px 22px 22px 22px / 26px 26px 18px 18px;
-  border: 3px dashed color-mix(in srgb, var(--moon) 40%, transparent);
-  display: grid;
-  grid-template-rows: auto 1fr;
-  justify-items: center;
-  align-items: center;
-  padding-top: 6px;
-  transition: border-color 0.2s, background 0.2s, transform 0.25s;
-}
-.slot .syl { font-size: clamp(28px, 6vw, 40px); line-height: 1; color: var(--moon); }
-.slot .face { display: grid; place-items: center; min-height: 52px; }
-.slot .empty { width: 38px; height: 28px; border-radius: 50%; border: 2px dashed color-mix(in srgb, var(--moon) 30%, transparent); }
-.slot.current .empty { border-color: color-mix(in srgb, var(--gold) 70%, transparent); }
-.slot.current { border-color: var(--gold); transform: translateY(-3px); }
-.slot.filled {
-  border: 3px solid var(--mint);
-  background: color-mix(in srgb, var(--mint) 16%, transparent);
-  animation: slotIn 0.35s cubic-bezier(.3, 1.6, .5, 1);
-}
-.slot.filled .syl { color: var(--mint); }
-@keyframes slotIn { from { transform: scale(0.8); } to { transform: none; } }
-
 .stage { width: 100%; max-width: 960px; min-height: 280px; }
 
-/* 입 모양 타일 */
+/* 하단: 애니메이션이 끝나면 '한 번 더 보기' (재생 중에도 자리는 유지) */
 .tray {
   width: 100%;
   max-width: 960px;
   display: grid;
   justify-items: center;
-  gap: 8px;
   padding: 6px 12px 18px;
 }
-.hint { margin: 0; font-size: 18px; color: color-mix(in srgb, var(--moon) 85%, transparent); min-height: 1.3em; text-align: center; }
-.tiles { display: flex; gap: clamp(6px, 2vw, 14px); flex-wrap: wrap; justify-content: center; }
-.tile {
-  width: clamp(62px, 16vw, 80px);
-  height: clamp(62px, 16vw, 80px);
-  display: grid;
-  place-items: center;
-  background: var(--parchment);
-  border: none;
-  border-radius: 20px;
-  box-shadow: 0 5px 0 #c9a96e;
-  cursor: pointer;
-  transition: transform 0.12s, box-shadow 0.12s;
-}
-.tile:hover:not(:disabled) { transform: translateY(-3px); box-shadow: 0 8px 0 #c9a96e; }
-.tile:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 2px 0 #c9a96e; }
-.tile:disabled { opacity: 0.45; cursor: default; }
-.tile.wrong { animation: nope 0.42s; box-shadow: 0 5px 0 var(--scarf); }
-@keyframes nope {
-  0%, 100% { transform: none; }
-  20% { transform: translateX(-7px) rotate(-4deg); }
-  40% { transform: translateX(6px) rotate(3deg); }
-  60% { transform: translateX(-4px); }
-  80% { transform: translateX(3px); }
-}
+.tray.playing .again { visibility: hidden; }
 .again {
   font: inherit;
   font-size: 22px;
@@ -160,11 +104,6 @@ body {
 button:focus-visible { outline: 3px solid var(--mint); outline-offset: 3px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-@media (prefers-reduced-motion: reduce) {
-  .slot, .tile, .slot.filled, .tile.wrong { animation: none; transition: none; }
-}
 @media (max-height: 620px) {
-  .slot { width: 68px; }
-  .slot .face { min-height: 40px; }
   .top { padding-top: 8px; }
 }
